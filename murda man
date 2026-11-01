@@ -37,7 +37,6 @@ local Settings = {
     Strength = 12,
     ColorIndex = 1,
     RoleESP = true,
-    RoleESPNames = true,
 }
 
 local Palette = {
@@ -379,18 +378,6 @@ local roleEspButton = make("TextButton", {
 }, rolePage)
 round(roleEspButton, 8)
 
--- Independent toggle for player names in the ESP labels.
-local roleNamesButton = make("TextButton", {
-    Size = UDim2.new(1, 0, 0, 34),
-    BackgroundColor3 = accent(),
-    Text = "PLAYER NAMES  /  ON",
-    TextColor3 = BG,
-    TextSize = 10,
-    Font = Enum.Font.GothamBlack,
-    AutoButtonColor = true,
-}, rolePage)
-round(roleNamesButton, 8)
-
 local roleStatus = make("TextLabel", {
     Size = UDim2.new(1, 0, 0, 28),
     BackgroundTransparency = 1,
@@ -414,7 +401,6 @@ make("UIListLayout", {
 
 local roleRows = {}
 local updateRoleScanner
-local getReplicatedRole
 local roleEspObjects = {}
 local ROLE_COLORS = {
     MURDERER = Color3.fromRGB(255, 75, 90),
@@ -429,4 +415,659 @@ local function removeRoleESP(player)
     if objects then
         -- Clear the registry first so a failed Destroy cannot leave a stale entry.
         roleEspObjects[player] = nil
-        pcall(function() if objects.highlight then objects.highlight:D
+        pcall(function() if objects.highlight then objects.highlight:Destroy() end end)
+        pcall(function() if objects.billboard then objects.billboard:Destroy() end end)
+    end
+end
+
+local function roleESPObjectsValid(objects, character, adornee)
+    return objects
+        and objects.character == character
+        and objects.highlight and objects.highlight.Parent == character
+        and objects.billboard and objects.billboard.Parent == PlayerGui
+        and objects.label and objects.label.Parent == objects.billboard
+        and objects.stroke and objects.stroke.Parent == objects.label
+        and objects.highlight.Adornee == character
+        and objects.billboard.Adornee == adornee
+end
+
+local function updateRoleESP(player, role)
+    if not Settings.RoleESP or player == LocalPlayer or player.Parent ~= Players then
+        removeRoleESP(player)
+        return
+    end
+
+    local character = player.Character
+    local adornee = character and (character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart"))
+    if not character or not adornee or not adornee:IsA("BasePart") then
+        removeRoleESP(player)
+        return
+    end
+
+    local objects = roleEspObjects[player]
+    if not roleESPObjectsValid(objects, character, adornee) then
+        removeRoleESP(player)
+
+        local highlight = make("Highlight", {
+            Name = "MM2RoleESPHighlight",
+            Adornee = character,
+            FillTransparency = 0.72,
+            OutlineTransparency = 0,
+            DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        }, character)
+
+        local billboard = make("BillboardGui", {
+            Name = "MM2RoleESPLabel",
+            Adornee = adornee,
+            Size = UDim2.fromOffset(190, 42),
+            StudsOffset = Vector3.new(0, 3.2, 0),
+            AlwaysOnTop = true,
+            MaxDistance = 1000,
+            Enabled = true,
+        }, PlayerGui)
+
+        local label = make("TextLabel", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundColor3 = BG,
+            BackgroundTransparency = 0.18,
+            BorderSizePixel = 0,
+            Text = player.DisplayName .. "  /  UNKNOWN",
+            TextColor3 = ROLE_COLORS.UNKNOWN,
+            TextSize = 12,
+            Font = Enum.Font.GothamBlack,
+            TextStrokeTransparency = 0.35,
+        }, billboard)
+        round(label, 7)
+        local stroke = outline(label, ROLE_COLORS.UNKNOWN, 1, 0.15)
+
+        objects = {
+            character = character,
+            highlight = highlight,
+            billboard = billboard,
+            label = label,
+            stroke = stroke,
+        }
+        roleEspObjects[player] = objects
+    end
+
+    -- Re-assert these properties on every refresh. This repairs instances that
+    -- were re-adorneed/reparented by a respawn or another local script.
+    objects.highlight.Adornee = character
+    objects.billboard.Adornee = adornee
+    objects.billboard.Enabled = true
+
+    local color = ROLE_COLORS[role] or ROLE_COLORS.UNKNOWN
+    objects.label.Text = player.DisplayName .. "  /  " .. (ROLE_COLORS[role] and role or "UNKNOWN")
+    objects.label.TextColor3 = color
+    objects.stroke.Color = color
+    objects.highlight.FillColor = color
+    objects.highlight.OutlineColor = color
+end
+
+connect(roleEspButton.Activated, function()
+    Settings.RoleESP = not Settings.RoleESP
+    roleEspButton.Text = Settings.RoleESP and "ROLE ESP  /  ON" or "ROLE ESP  /  OFF"
+    roleEspButton.BackgroundColor3 = Settings.RoleESP and accent() or PANEL2
+    roleEspButton.TextColor3 = Settings.RoleESP and BG or MUTED
+    if not Settings.RoleESP then
+        for player in pairs(roleEspObjects) do removeRoleESP(player) end
+    else
+        -- Rebuild immediately instead of waiting for the next timed scan.
+        task.defer(updateRoleScanner)
+    end
+end)
+
+local function getReplicatedRole(player)
+    local containers = {player.Character, player:FindFirstChildOfClass("Backpack")}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then
+                    local toolName = string.lower(item.Name)
+                    if toolName == "knife" or toolName:find("knife", 1, true) then
+                        return "MURDERER"
+                    elseif toolName == "gun" or toolName:find("revolver", 1, true)
+                        or toolName:find("pistol", 1, true) then
+                        return "SHERIFF"
+                    end
+                end
+            end
+        end
+    end
+
+    -- Some game versions replicate a role attribute/value; use it only when present.
+    local roleAttribute = player:GetAttribute("Role")
+    if typeof(roleAttribute) == "string" then
+        local role = string.upper(roleAttribute)
+        if role:find("MURDER", 1, true) then return "MURDERER" end
+        if role:find("SHERIFF", 1, true) then return "SHERIFF" end
+        if role:find("HERO", 1, true) then return "HERO" end
+        if role:find("INNOCENT", 1, true) then return "INNOCENT" end
+    end
+
+    return "UNKNOWN"
+end
+
+updateRoleScanner = function()
+    local present = {}
+    local activeCount = 0
+    local knownMurderer, knownSheriff = false, false
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            present[player] = true
+            activeCount += 1
+            local role = getReplicatedRole(player)
+            local espOK = pcall(updateRoleESP, player, role)
+            if not espOK then
+                removeRoleESP(player)
+            end
+            if role == "MURDERER" then knownMurderer = true end
+            if role == "SHERIFF" then knownSheriff = true end
+
+            local row = roleRows[player]
+            if not row then
+                row = make("Frame", {
+                    Name = "Role_" .. player.UserId,
+                    Size = UDim2.new(1, 0, 0, 38),
+                    BackgroundColor3 = PANEL,
+                    BorderSizePixel = 0,
+                }, roleList)
+                round(row, 8)
+                local nameLabel = make("TextLabel", {
+                    Position = UDim2.fromOffset(10, 0),
+                    Size = UDim2.new(0.58, -10, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text = player.DisplayName,
+                    TextColor3 = WHITE,
+                    TextSize = 10,
+                    Font = Enum.Font.GothamSemibold,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                }, row)
+                local roleLabel = make("TextLabel", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -9, 0.5, 0),
+                    Size = UDim2.new(0.42, -8, 0, 22),
+                    BackgroundColor3 = PANEL2,
+                    Text = "UNKNOWN",
+                    TextColor3 = MUTED,
+                    TextSize = 9,
+                    Font = Enum.Font.GothamBlack,
+                }, row)
+                round(roleLabel, 6)
+                roleRows[player] = {frame = row, name = nameLabel, role = roleLabel}
+            end
+
+            local color = MUTED
+            if role == "MURDERER" then
+                color = Color3.fromRGB(255, 85, 100)
+            elseif role == "SHERIFF" then
+                color = Color3.fromRGB(90, 165, 255)
+            elseif role == "HERO" then
+                color = Color3.fromRGB(255, 205, 85)
+            elseif role == "INNOCENT" then
+                color = Color3.fromRGB(105, 220, 145)
+            end
+
+            row.name.Text = player.DisplayName
+            row.role.Text = role
+            row.role.TextColor3 = color
+            row.role.BackgroundColor3 = PANEL2
+        end
+    end
+
+    for player, row in pairs(roleRows) do
+        if not present[player] then
+            if row.frame then row.frame:Destroy() end
+            roleRows[player] = nil
+            removeRoleESP(player)
+        end
+    end
+
+    if activeCount == 0 then
+        roleStatus.Text = "WAITING FOR OTHER PLAYERS..."
+    elseif knownMurderer and knownSheriff then
+        roleStatus.Text = "MURDERER + SHERIFF DETECTED"
+    elseif knownMurderer then
+        roleStatus.Text = "MURDERER DETECTED  /  SHERIFF NOT REPLICATED"
+    elseif knownSheriff then
+        roleStatus.Text = "SHERIFF DETECTED  /  MURDERER NOT REPLICATED"
+    else
+        roleStatus.Text = "ROUND ROLES NOT EXPOSED TO CLIENT  /  UNKNOWN IS NOT A GUESS"
+    end
+end
+
+-- Respawns and late-loading character parts are common causes of stale ESP.
+-- Queue a scan after character changes; the periodic reconciliation handles parts
+-- that appear a little later (Head / HumanoidRootPart).
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        connect(player.CharacterAdded, function()
+            task.delay(0.15, function()
+                if GUI.Parent and Settings.RoleESP then
+                    pcall(updateRoleScanner)
+                end
+            end)
+        end)
+    end
+end
+connect(Players.PlayerAdded, function(player)
+    connect(player.CharacterAdded, function()
+        task.delay(0.15, function()
+            if GUI.Parent and Settings.RoleESP then
+                pcall(updateRoleScanner)
+            end
+        end)
+    end)
+end)
+
+local roleScanClock = 0
+connect(RunService.Heartbeat, function(dt)
+    roleScanClock += dt
+    if roleScanClock >= 0.25 then
+        roleScanClock = 0
+        local scanOK = pcall(updateRoleScanner)
+        if not scanOK then
+            -- The next heartbeat retries; valid ESP instances are retained/repaired.
+        end
+    end
+end)
+
+selectPage("LOCK")
+
+local dragging, dragInput, dragStart, startPos
+connect(Top.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging, dragStart, startPos = true, input.Position, Main.Position
+        connect(input.Changed, function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+    end
+end)
+connect(Top.InputChanged, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+end)
+connect(UserInputService.InputChanged, function(input)
+    if dragging and input == dragInput then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+local Reopen = make("TextButton", {Position = UDim2.new(0, 18, 0.5, -20), Size = UDim2.fromOffset(132, 40), BackgroundColor3 = PANEL, Text = "OPEN  /  MM2 LOCK-ON", TextColor3 = accent(), TextSize = 9, Font = Enum.Font.GothamBlack, Visible = false}, GUI)
+round(Reopen, 10)
+outline(Reopen, accent(), 1, 0.25)
+connect(Hide.Activated, function() Main.Visible = false; Reopen.Visible = true end)
+connect(Reopen.Activated, function() Main.Visible = true; Reopen.Visible = false end)
+
+local Ring = make("Frame", {Name = "FOVRing", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(Settings.FOV * 2, Settings.FOV * 2), BackgroundTransparency = 1}, GUI)
+round(Ring, 1000)
+local RingStroke = outline(Ring, accent(), 2, 0.08)
+local Readout = make("TextLabel", {AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, Settings.FOV + 14), Size = UDim2.fromOffset(240, 27), BackgroundColor3 = BG, BackgroundTransparency = 0.1, Text = "TARGET  /  NONE", TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamBold}, GUI)
+round(Readout, 8)
+outline(Readout, Color3.fromRGB(65, 78, 101), 1, 0.35)
+local Marker = make("BillboardGui", {Name = "MM2TargetMarker", Size = UDim2.fromOffset(150, 26), StudsOffset = Vector3.new(0, 3.1, 0), AlwaysOnTop = true, Enabled = false}, PlayerGui)
+make("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "◆ LOCKED TARGET", TextColor3 = accent(), TextStrokeTransparency = 0.2, TextSize = 11, Font = Enum.Font.GothamBlack}, Marker)
+
+refreshAccent = function()
+    local color = accent()
+    AccentBar.BackgroundColor3 = color
+    strengthFill.BackgroundColor3 = color
+    strengthValue.TextColor3 = color
+    RingStroke.Color = color
+    Readout.TextColor3 = color
+    local markerLabel = Marker:FindFirstChildOfClass("TextLabel")
+    if markerLabel then markerLabel.TextColor3 = color end
+    Reopen.TextColor3 = color
+    local reopenStroke = Reopen:FindFirstChildOfClass("UIStroke")
+    if reopenStroke then reopenStroke.Color = color end
+    inviteBox.TextColor3 = color
+    copyButton.BackgroundColor3 = color
+    local knobStroke = strengthKnob:FindFirstChildOfClass("UIStroke")
+    if knobStroke then knobStroke.Color = color end
+    for key, button in pairs(ToggleButtons) do
+        if button then
+            local enabled = Settings[key] == true
+            button.BackgroundColor3 = enabled and color or PANEL2
+            button.TextColor3 = enabled and BG or MUTED
+        end
+    end
+    for _, button in pairs(KeybindButtons) do
+        if button and button.Text ~= "PRESS KEY..." then button.TextColor3 = color end
+    end
+    for name, page in pairs(Pages) do
+        page.ScrollBarImageColor3 = color
+    end
+    for _, button in ipairs(TabBar:GetChildren()) do
+        if button:IsA("TextButton") and button.Name == (CurrentPage and CurrentPage.Name) then
+            button.BackgroundColor3 = color
+            button.TextColor3 = BG
+        end
+    end
+end
+
+local npcCache = {}
+
+local function registerNPCFromHumanoid(humanoid)
+    if not humanoid or not humanoid:IsA("Humanoid") then return end
+    local model = humanoid.Parent
+    if model and model:IsA("Model") and not Players:GetPlayerFromCharacter(model)
+        and model ~= LocalPlayer.Character
+        and model:GetAttribute("LockOnTargetable") ~= false then
+        npcCache[model] = true
+    end
+end
+
+for _, obj in ipairs(Workspace:GetDescendants()) do
+    if obj:IsA("Humanoid") then registerNPCFromHumanoid(obj) end
+end
+
+connect(Workspace.DescendantAdded, function(obj)
+    if obj:IsA("Humanoid") then registerNPCFromHumanoid(obj) end
+end)
+
+connect(Workspace.DescendantRemoving, function(obj)
+    if obj:IsA("Humanoid") then
+        local model = obj.Parent
+        if model then npcCache[model] = nil end
+    end
+end)
+
+local currentTarget
+local acquireClock = 0
+local sightClock = 0
+local cachedTargets = {}
+
+local function getAimPart(model)
+    if not model then return nil end
+    return model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("Head")
+end
+
+local function isAliveModel(model)
+    if not model or not model.Parent then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0 and getAimPart(model) ~= nil
+end
+
+local function isAllowedTarget(model)
+    if not isAliveModel(model) or model == LocalPlayer.Character then return false end
+    local player = Players:GetPlayerFromCharacter(model)
+    if player then return Settings.Players end
+    return Settings.NPCs and model:GetAttribute("LockOnTargetable") ~= false
+end
+
+local sightParams = RaycastParams.new()
+sightParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function visibleToCamera(model, part)
+    if not Settings.LineOfSight then return true end
+    Camera = Workspace.CurrentCamera
+    if not Camera or not part or not part.Parent then return false end
+    sightParams.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
+    local result = Workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, sightParams)
+    return result == nil or result.Instance:IsDescendantOf(model)
+end
+
+local function collectTargets()
+    local list, seen = {}, {}
+    if Settings.Players then
+        for _, player in ipairs(Players:GetPlayers()) do
+            local character = player.Character
+            if player ~= LocalPlayer and character and isAliveModel(character) then
+                seen[character] = true
+                table.insert(list, character)
+            end
+        end
+    end
+    if Settings.NPCs then
+        for model in pairs(npcCache) do
+            if model.Parent and not seen[model] and isAliveModel(model)
+                and model ~= LocalPlayer.Character
+                and model:GetAttribute("LockOnTargetable") ~= false then
+                seen[model] = true
+                table.insert(list, model)
+            elseif not model.Parent then
+                npcCache[model] = nil
+            end
+        end
+    end
+    return list
+end
+
+local function clearTarget(message)
+    currentTarget = nil
+    Marker.Adornee = nil
+    Marker.Enabled = false
+    Readout.Text = message or (Settings.LockOn and "TARGET  /  SEARCHING" or "TARGET  /  LOCK DISABLED")
+end
+
+local function getScreenDistance(model, center)
+    if not Camera or not isAllowedTarget(model) then return nil end
+    local part = getAimPart(model)
+    if not part then return nil end
+    local point, onScreen = Camera:WorldToViewportPoint(part.Position)
+    if not onScreen or point.Z <= 0 then return nil end
+    local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
+    if distance > Settings.FOV or not visibleToCamera(model, part) then return nil end
+    return distance, part
+end
+
+local function findBestTarget(center, exclude)
+    local bestModel, bestDistance = nil, Settings.FOV
+    for _, model in ipairs(cachedTargets) do
+        if model ~= exclude then
+            local distance = getScreenDistance(model, center)
+            if distance and distance < bestDistance then
+                bestModel, bestDistance = model, distance
+            end
+        end
+    end
+    return bestModel
+end
+
+local function switchTarget(direction)
+    Camera = Workspace.CurrentCamera
+    if not Camera then return end
+    cachedTargets = collectTargets()
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local candidates = {}
+    for _, model in ipairs(cachedTargets) do
+        local distance = getScreenDistance(model, center)
+        if distance then table.insert(candidates, {model = model, distance = distance}) end
+    end
+    table.sort(candidates, function(a, b) return a.distance < b.distance end)
+    if #candidates == 0 then
+        clearTarget("TARGET  /  NO VALID TARGETS")
+        return
+    end
+
+    local currentIndex
+    for i, entry in ipairs(candidates) do
+        if entry.model == currentTarget then currentIndex = i break end
+    end
+    local nextIndex
+    if currentIndex then
+        nextIndex = ((currentIndex - 1 + direction) % #candidates) + 1
+    else
+        nextIndex = direction >= 0 and 1 or #candidates
+    end
+    currentTarget = candidates[nextIndex].model
+end
+
+connect(NextTargetButton.Activated, function() switchTarget(1) end)
+connect(PreviousTargetButton.Activated, function() switchTarget(-1) end)
+
+setLockOn = function(value)
+    if Settings.LockOn == value then return end
+    Settings.LockOn = value
+    local button = ToggleButtons.LockOn
+    if button then
+        button.Text = value and "ON" or "OFF"
+        button.BackgroundColor3 = value and accent() or PANEL2
+        button.TextColor3 = value and BG or MUTED
+    end
+    if not value then
+        clearTarget("TARGET  /  LOCK DISABLED")
+    end
+end
+
+connect(UserInputService.InputBegan, function(input, gameProcessed)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if pendingKeybind then
+        local action = pendingKeybind
+        pendingKeybind = nil
+        if input.KeyCode == Enum.KeyCode.Escape then
+            KeybindButtons[action].Text = keyName(Keybinds[action])
+            KeybindButtons[action].TextColor3 = accent()
+            return
+        end
+        if input.KeyCode ~= Enum.KeyCode.Unknown then Keybinds[action] = input.KeyCode end
+        KeybindButtons[action].Text = keyName(Keybinds[action])
+        KeybindButtons[action].TextColor3 = accent()
+        return
+    end
+    if gameProcessed or UserInputService:GetFocusedTextBox() then return end
+    if input.KeyCode == Keybinds.ToggleLock then
+        setLockOn(not Settings.LockOn)
+    elseif input.KeyCode == Keybinds.NextTarget then
+        switchTarget(1)
+    elseif input.KeyCode == Keybinds.PreviousTarget then
+        switchTarget(-1)
+    elseif input.KeyCode == Keybinds.ToggleUI then
+        Main.Visible = not Main.Visible
+        Reopen.Visible = not Main.Visible
+    end
+end)
+
+-- Noclip is optional and only affects the local character while enabled.
+-- Original CanCollide values are restored when disabled or when the GUI is destroyed.
+local originalCollision = {}
+local function applyNoClip()
+    local character = LocalPlayer.Character
+    if not character then return end
+
+    if Settings.NoClip then
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if originalCollision[part] == nil then
+                    originalCollision[part] = part.CanCollide
+                end
+                part.CanCollide = false
+            end
+        end
+    else
+        for part, canCollide in pairs(originalCollision) do
+            if part and part.Parent then
+                part.CanCollide = canCollide
+            end
+            originalCollision[part] = nil
+        end
+    end
+end
+
+connect(LocalPlayer.CharacterAdded, function()
+    table.clear(originalCollision)
+end)
+
+RunService:UnbindFromRenderStep("MM2LockOnCamera")
+RunService:BindToRenderStep("MM2LockOnCamera", Enum.RenderPriority.Camera.Value + 2, function(dt)
+    Camera = Workspace.CurrentCamera
+    applyNoClip()
+    if not Camera then return end
+
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    Ring.Position = UDim2.fromOffset(center.X, center.Y)
+    Ring.Size = UDim2.fromOffset(Settings.FOV * 2, Settings.FOV * 2)
+    Ring.Visible = Settings.ShowFOV
+    RingStroke.Color = accent()
+    Readout.Position = UDim2.fromOffset(center.X, center.Y + Settings.FOV + 14)
+    Readout.Visible = Settings.ShowMarker
+    Readout.TextColor3 = accent()
+    Marker.Enabled = false
+
+    Status.Text = Settings.LockOn and "●  LOCK ACTIVE  /  TRACKING" or "●  LOCK DISABLED  /  READY"
+    Status.TextColor3 = Settings.LockOn and accent() or MUTED
+
+    if not Settings.LockOn then
+        clearTarget()
+        return
+    end
+
+    acquireClock += dt
+    sightClock += dt
+    if acquireClock >= 0.35 then
+        acquireClock %= 0.35
+        cachedTargets = collectTargets()
+    end
+
+    if currentTarget then
+        local currentPart = getAimPart(currentTarget)
+        local currentDistance
+        if isAllowedTarget(currentTarget) and currentPart then
+            local point, onScreen = Camera:WorldToViewportPoint(currentPart.Position)
+            if onScreen and point.Z > 0 then
+                currentDistance = (Vector2.new(point.X, point.Y) - center).Magnitude
+            end
+        end
+        if not currentDistance or currentDistance > Settings.FOV then
+            clearTarget("TARGET  /  TARGET LOST")
+        end
+    end
+
+    if currentTarget and Settings.LineOfSight and sightClock >= 0.15 then
+        sightClock = 0
+        local part = getAimPart(currentTarget)
+        if not part or not visibleToCamera(currentTarget, part) then
+            clearTarget("TARGET  /  LINE OF SIGHT LOST")
+        end
+    end
+
+    if not currentTarget then
+        currentTarget = findBestTarget(center)
+    end
+
+    if currentTarget then
+        local part = getAimPart(currentTarget)
+        if part then
+            local targetPlayer = Players:GetPlayerFromCharacter(currentTarget)
+            local label = targetPlayer and targetPlayer.DisplayName or currentTarget.Name
+            local point = Camera:WorldToViewportPoint(part.Position)
+            local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
+            Readout.Text = string.format("LOCKED  /  %s  /  %.0f PX", label, distance)
+
+            if Settings.ShowMarker then
+                Marker.Adornee = part
+                Marker.Enabled = true
+                local markerText = Marker:FindFirstChildOfClass("TextLabel")
+                if markerText then markerText.TextColor3 = accent() end
+            end
+            -- Aim-assist only: smoothly adjust camera rotation while preserving
+            -- the Roblox camera position and current CameraType.
+            -- The character's root part and Humanoid.AutoRotate are never changed.
+            local camPos = Camera.CFrame.Position
+            local desiredCFrame = CFrame.lookAt(camPos, part.Position, Vector3.yAxis)
+            local response = Settings.Strength -- higher = stronger/faster camera correction
+            local alpha = 1 - math.exp(-response * math.max(dt, 0))
+            Camera.CFrame = Camera.CFrame:Lerp(desiredCFrame, alpha)
+        else
+            clearTarget("TARGET  /  TARGET LOST")
+        end
+    else
+        Readout.Text = "TARGET  /  SEARCHING"
+    end
+end)
+
+connect(GUI.Destroying, function()
+    Settings.NoClip = false
+    Settings.RoleESP = false
+    for player in pairs(roleEspObjects) do removeRoleESP(player) end
+    applyNoClip()
+    RunService:UnbindFromRenderStep("MM2LockOnCamera")
+    for i = #Connections, 1, -1 do
+        local connection = Connections[i]
+        if connection and connection.Connected then connection:Disconnect() end
+        Connections[i] = nil
+    end
+end)
+
+print("MM2 Lock-On Suite loaded: role scanner + role ESP, optimized tracking, and clean connection teardown.")
