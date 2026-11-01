@@ -36,6 +36,7 @@ local Settings = {
     FOV = 180,
     Strength = 12,
     ColorIndex = 1,
+    RoleESP = true,
 }
 
 local Palette = {
@@ -88,7 +89,7 @@ make("Frame", {Position = UDim2.new(0, 0, 1, -16), Size = UDim2.new(1, 0, 0, 16)
 local AccentBar = make("Frame", {Position = UDim2.fromOffset(16, 17), Size = UDim2.fromOffset(4, 43), BackgroundColor3 = accent(), BorderSizePixel = 0}, Top)
 round(AccentBar, 4)
 make("TextLabel", {Position = UDim2.fromOffset(30, 12), Size = UDim2.new(1, -85, 0, 29), BackgroundTransparency = 1, Text = "MM2 LOCK-ON", TextColor3 = WHITE, TextSize = 19, Font = Enum.Font.GothamBlack, TextXAlignment = Enum.TextXAlignment.Left}, Top)
-make("TextLabel", {Position = UDim2.fromOffset(31, 42), Size = UDim2.new(1, -85, 0, 18), BackgroundTransparency = 1, Text = "TARGETING SUITE  /  PLAYER + NPC", TextColor3 = MUTED, TextSize = 9, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left}, Top)
+make("TextLabel", {Position = UDim2.fromOffset(31, 42), Size = UDim2.new(1, -85, 0, 18), BackgroundTransparency = 1, Text = "LOCK-ON + ROLE SCANNER  /  MM2", TextColor3 = MUTED, TextSize = 9, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left}, Top)
 local Hide = make("TextButton", {Position = UDim2.new(1, -43, 0, 19), Size = UDim2.fromOffset(27, 27), BackgroundColor3 = PANEL2, Text = "—", TextColor3 = WHITE, TextSize = 15, Font = Enum.Font.GothamBold}, Top)
 round(Hide, 8)
 
@@ -105,7 +106,7 @@ local function createPage(name)
     Pages[name] = page
     return page
 end
-for _, name in ipairs({"LOCK", "FILTERS", "STYLE", "KEYS", "DISCORD"}) do createPage(name) end
+for _, name in ipairs({"LOCK", "FILTERS", "STYLE", "KEYS", "ROLES", "DISCORD"}) do createPage(name) end
 
 local function selectPage(name)
     CurrentPage = Pages[name]
@@ -118,8 +119,8 @@ local function selectPage(name)
         end
     end
 end
-for i, name in ipairs({"LOCK", "FILTERS", "STYLE", "KEYS", "DISCORD"}) do
-    local b = make("TextButton", {Name = name, Size = UDim2.new(0.2, -4, 1, 0), BackgroundColor3 = PANEL, Text = name, TextColor3 = MUTED, TextSize = 9, Font = Enum.Font.GothamBlack, LayoutOrder = i}, TabBar)
+for i, name in ipairs({"LOCK", "FILTERS", "STYLE", "KEYS", "ROLES", "DISCORD"}) do
+    local b = make("TextButton", {Name = name, Size = UDim2.new(1/6, -5, 1, 0), BackgroundColor3 = PANEL, Text = name, TextColor3 = MUTED, TextSize = 9, Font = Enum.Font.GothamBlack, LayoutOrder = i}, TabBar)
     round(b, 8)
     connect(b.Activated, function() selectPage(name) end)
 end
@@ -354,6 +355,322 @@ connect(copyButton.Activated, function()
         inviteBox:CaptureFocus()
         inviteBox.CursorPosition = #inviteBox.Text + 1
         copyButton.Text = "SELECT LINK TO COPY"
+    end
+end)
+
+
+-- ROLE REVEAL
+-- Uses only role/tool information replicated to this client by the game.
+-- If MM2 hides a player's role and their role tool from the client, that player
+-- is shown as UNKNOWN rather than guessed.
+local rolePage = Pages.ROLES
+section(rolePage, "ROUND ROLE SCANNER")
+
+-- Role ESP toggle: labels are based only on role data actually replicated to this client.
+local roleEspButton = make("TextButton", {
+    Size = UDim2.new(1, 0, 0, 34),
+    BackgroundColor3 = accent(),
+    Text = "ROLE ESP  /  ON",
+    TextColor3 = BG,
+    TextSize = 10,
+    Font = Enum.Font.GothamBlack,
+    AutoButtonColor = true,
+}, rolePage)
+round(roleEspButton, 8)
+
+local roleStatus = make("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 28),
+    BackgroundTransparency = 1,
+    Text = "SCANNING REPLICATED PLAYER DATA...",
+    TextColor3 = MUTED,
+    TextSize = 9,
+    Font = Enum.Font.GothamBold,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, rolePage)
+
+local roleList = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 10),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+}, rolePage)
+make("UIListLayout", {
+    Padding = UDim.new(0, 6),
+    SortOrder = Enum.SortOrder.Name,
+}, roleList)
+
+local roleRows = {}
+local updateRoleScanner
+local roleEspObjects = {}
+local ROLE_COLORS = {
+    MURDERER = Color3.fromRGB(255, 75, 90),
+    SHERIFF = Color3.fromRGB(75, 155, 255),
+    HERO = Color3.fromRGB(255, 205, 75),
+    INNOCENT = Color3.fromRGB(85, 220, 135),
+    UNKNOWN = Color3.fromRGB(175, 185, 200),
+}
+
+local function removeRoleESP(player)
+    local objects = roleEspObjects[player]
+    if objects then
+        -- Clear the registry first so a failed Destroy cannot leave a stale entry.
+        roleEspObjects[player] = nil
+        pcall(function() if objects.highlight then objects.highlight:Destroy() end end)
+        pcall(function() if objects.billboard then objects.billboard:Destroy() end end)
+    end
+end
+
+local function roleESPObjectsValid(objects, character, adornee)
+    return objects
+        and objects.character == character
+        and objects.highlight and objects.highlight.Parent == character
+        and objects.billboard and objects.billboard.Parent == PlayerGui
+        and objects.label and objects.label.Parent == objects.billboard
+        and objects.stroke and objects.stroke.Parent == objects.label
+        and objects.highlight.Adornee == character
+        and objects.billboard.Adornee == adornee
+end
+
+local function updateRoleESP(player, role)
+    if not Settings.RoleESP or player == LocalPlayer or player.Parent ~= Players then
+        removeRoleESP(player)
+        return
+    end
+
+    local character = player.Character
+    local adornee = character and (character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart"))
+    if not character or not adornee or not adornee:IsA("BasePart") then
+        removeRoleESP(player)
+        return
+    end
+
+    local objects = roleEspObjects[player]
+    if not roleESPObjectsValid(objects, character, adornee) then
+        removeRoleESP(player)
+
+        local highlight = make("Highlight", {
+            Name = "MM2RoleESPHighlight",
+            Adornee = character,
+            FillTransparency = 0.72,
+            OutlineTransparency = 0,
+            DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        }, character)
+
+        local billboard = make("BillboardGui", {
+            Name = "MM2RoleESPLabel",
+            Adornee = adornee,
+            Size = UDim2.fromOffset(190, 42),
+            StudsOffset = Vector3.new(0, 3.2, 0),
+            AlwaysOnTop = true,
+            MaxDistance = 1000,
+            Enabled = true,
+        }, PlayerGui)
+
+        local label = make("TextLabel", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundColor3 = BG,
+            BackgroundTransparency = 0.18,
+            BorderSizePixel = 0,
+            Text = player.DisplayName .. "  /  UNKNOWN",
+            TextColor3 = ROLE_COLORS.UNKNOWN,
+            TextSize = 12,
+            Font = Enum.Font.GothamBlack,
+            TextStrokeTransparency = 0.35,
+        }, billboard)
+        round(label, 7)
+        local stroke = outline(label, ROLE_COLORS.UNKNOWN, 1, 0.15)
+
+        objects = {
+            character = character,
+            highlight = highlight,
+            billboard = billboard,
+            label = label,
+            stroke = stroke,
+        }
+        roleEspObjects[player] = objects
+    end
+
+    -- Re-assert these properties on every refresh. This repairs instances that
+    -- were re-adorneed/reparented by a respawn or another local script.
+    objects.highlight.Adornee = character
+    objects.billboard.Adornee = adornee
+    objects.billboard.Enabled = true
+
+    local color = ROLE_COLORS[role] or ROLE_COLORS.UNKNOWN
+    objects.label.Text = player.DisplayName .. "  /  " .. (ROLE_COLORS[role] and role or "UNKNOWN")
+    objects.label.TextColor3 = color
+    objects.stroke.Color = color
+    objects.highlight.FillColor = color
+    objects.highlight.OutlineColor = color
+end
+
+connect(roleEspButton.Activated, function()
+    Settings.RoleESP = not Settings.RoleESP
+    roleEspButton.Text = Settings.RoleESP and "ROLE ESP  /  ON" or "ROLE ESP  /  OFF"
+    roleEspButton.BackgroundColor3 = Settings.RoleESP and accent() or PANEL2
+    roleEspButton.TextColor3 = Settings.RoleESP and BG or MUTED
+    if not Settings.RoleESP then
+        for player in pairs(roleEspObjects) do removeRoleESP(player) end
+    else
+        -- Rebuild immediately instead of waiting for the next timed scan.
+        task.defer(updateRoleScanner)
+    end
+end)
+
+local function getReplicatedRole(player)
+    local containers = {player.Character, player:FindFirstChildOfClass("Backpack")}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then
+                    local toolName = string.lower(item.Name)
+                    if toolName == "knife" or toolName:find("knife", 1, true) then
+                        return "MURDERER"
+                    elseif toolName == "gun" or toolName:find("revolver", 1, true)
+                        or toolName:find("pistol", 1, true) then
+                        return "SHERIFF"
+                    end
+                end
+            end
+        end
+    end
+
+    -- Some game versions replicate a role attribute/value; use it only when present.
+    local roleAttribute = player:GetAttribute("Role")
+    if typeof(roleAttribute) == "string" then
+        local role = string.upper(roleAttribute)
+        if role:find("MURDER", 1, true) then return "MURDERER" end
+        if role:find("SHERIFF", 1, true) then return "SHERIFF" end
+        if role:find("HERO", 1, true) then return "HERO" end
+        if role:find("INNOCENT", 1, true) then return "INNOCENT" end
+    end
+
+    return "UNKNOWN"
+end
+
+updateRoleScanner = function()
+    local present = {}
+    local activeCount = 0
+    local knownMurderer, knownSheriff = false, false
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            present[player] = true
+            activeCount += 1
+            local role = getReplicatedRole(player)
+            local espOK = pcall(updateRoleESP, player, role)
+            if not espOK then
+                removeRoleESP(player)
+            end
+            if role == "MURDERER" then knownMurderer = true end
+            if role == "SHERIFF" then knownSheriff = true end
+
+            local row = roleRows[player]
+            if not row then
+                row = make("Frame", {
+                    Name = "Role_" .. player.UserId,
+                    Size = UDim2.new(1, 0, 0, 38),
+                    BackgroundColor3 = PANEL,
+                    BorderSizePixel = 0,
+                }, roleList)
+                round(row, 8)
+                local nameLabel = make("TextLabel", {
+                    Position = UDim2.fromOffset(10, 0),
+                    Size = UDim2.new(0.58, -10, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text = player.DisplayName,
+                    TextColor3 = WHITE,
+                    TextSize = 10,
+                    Font = Enum.Font.GothamSemibold,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                }, row)
+                local roleLabel = make("TextLabel", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -9, 0.5, 0),
+                    Size = UDim2.new(0.42, -8, 0, 22),
+                    BackgroundColor3 = PANEL2,
+                    Text = "UNKNOWN",
+                    TextColor3 = MUTED,
+                    TextSize = 9,
+                    Font = Enum.Font.GothamBlack,
+                }, row)
+                round(roleLabel, 6)
+                roleRows[player] = {frame = row, name = nameLabel, role = roleLabel}
+            end
+
+            local color = MUTED
+            if role == "MURDERER" then
+                color = Color3.fromRGB(255, 85, 100)
+            elseif role == "SHERIFF" then
+                color = Color3.fromRGB(90, 165, 255)
+            elseif role == "HERO" then
+                color = Color3.fromRGB(255, 205, 85)
+            elseif role == "INNOCENT" then
+                color = Color3.fromRGB(105, 220, 145)
+            end
+
+            row.name.Text = player.DisplayName
+            row.role.Text = role
+            row.role.TextColor3 = color
+            row.role.BackgroundColor3 = PANEL2
+        end
+    end
+
+    for player, row in pairs(roleRows) do
+        if not present[player] then
+            if row.frame then row.frame:Destroy() end
+            roleRows[player] = nil
+            removeRoleESP(player)
+        end
+    end
+
+    if activeCount == 0 then
+        roleStatus.Text = "WAITING FOR OTHER PLAYERS..."
+    elseif knownMurderer and knownSheriff then
+        roleStatus.Text = "MURDERER + SHERIFF DETECTED"
+    elseif knownMurderer then
+        roleStatus.Text = "MURDERER DETECTED  /  SHERIFF NOT REPLICATED"
+    elseif knownSheriff then
+        roleStatus.Text = "SHERIFF DETECTED  /  MURDERER NOT REPLICATED"
+    else
+        roleStatus.Text = "ROUND ROLES NOT EXPOSED TO CLIENT  /  UNKNOWN IS NOT A GUESS"
+    end
+end
+
+-- Respawns and late-loading character parts are common causes of stale ESP.
+-- Queue a scan after character changes; the periodic reconciliation handles parts
+-- that appear a little later (Head / HumanoidRootPart).
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        connect(player.CharacterAdded, function()
+            task.delay(0.15, function()
+                if GUI.Parent and Settings.RoleESP then
+                    pcall(updateRoleScanner)
+                end
+            end)
+        end)
+    end
+end
+connect(Players.PlayerAdded, function(player)
+    connect(player.CharacterAdded, function()
+        task.delay(0.15, function()
+            if GUI.Parent and Settings.RoleESP then
+                pcall(updateRoleScanner)
+            end
+        end)
+    end)
+end)
+
+local roleScanClock = 0
+connect(RunService.Heartbeat, function(dt)
+    roleScanClock += dt
+    if roleScanClock >= 0.25 then
+        roleScanClock = 0
+        local scanOK = pcall(updateRoleScanner)
+        if not scanOK then
+            -- The next heartbeat retries; valid ESP instances are retained/repaired.
+        end
     end
 end)
 
@@ -742,6 +1059,8 @@ end)
 
 connect(GUI.Destroying, function()
     Settings.NoClip = false
+    Settings.RoleESP = false
+    for player in pairs(roleEspObjects) do removeRoleESP(player) end
     applyNoClip()
     RunService:UnbindFromRenderStep("MM2LockOnCamera")
     for i = #Connections, 1, -1 do
@@ -751,4 +1070,4 @@ connect(GUI.Destroying, function()
     end
 end)
 
-print("MM2 Lock-On Suite loaded: optimized tracking, reusable raycasts, and clean connection teardown.")
+print("MM2 Lock-On Suite loaded: role scanner + role ESP, optimized tracking, and clean connection teardown.")
